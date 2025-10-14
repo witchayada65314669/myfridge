@@ -6,6 +6,10 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 
+// ✅ แก้ path ให้ตรงกับที่สร้างไฟล์จริง
+import 'package:myfridge_test/log_service.dart';
+import 'package:myfridge_test/quantity_converter.dart';
+
 class BarcodeScannerPage extends StatefulWidget {
   const BarcodeScannerPage({super.key});
 
@@ -33,30 +37,49 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage>
     );
   }
 
+  // ✅ ย้ายออกมาที่ระดับคลาส ให้เมธอดอื่นเรียกได้
+  String _mapCategory(dynamic raw) {
+    final c = (raw ?? '').toString().toLowerCase().trim();
+    switch (c) {
+      case 'pork':
+      case 'beef':
+      case 'chicken':
+        return c;
+      case 'vegetable':
+      case 'veggie':
+        return 'vegetable';
+      case 'fruit':
+      case 'fruits':
+        return 'fruit';
+      case 'seafood':
+        return 'seafood';
+      case 'meat':
+        return 'meat';
+      default:
+        return 'other';
+    }
+  }
+
   @override
   void dispose() {
     _animationController.dispose();
     super.dispose();
   }
 
-  /// 📸 ถ่ายรูปและอัปโหลดไปยัง Firebase Storage
   Future<String?> _captureAndUploadImage() async {
     try {
       final picker = ImagePicker();
       final image = await picker.pickImage(source: ImageSource.camera);
-
       if (image == null) return null;
 
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) return null;
 
-      final storageRef = FirebaseStorage.instance
-          .ref()
-          .child('fridge_images/${user.uid}/${DateTime.now().millisecondsSinceEpoch}.jpg');
+      final storageRef = FirebaseStorage.instance.ref().child(
+          'fridge_images/${user.uid}/${DateTime.now().millisecondsSinceEpoch}.jpg');
 
       await storageRef.putFile(File(image.path));
       final downloadUrl = await storageRef.getDownloadURL();
-      print('📸 Uploaded image URL: $downloadUrl');
       return downloadUrl;
     } catch (e) {
       print('🚨 Error capturing/uploading image: $e');
@@ -64,7 +87,6 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage>
     }
   }
 
-  /// 🔍 ค้นหาสินค้าจากบาร์โค้ด
   Future<Map<String, dynamic>?> _getProductByBarcode(String barcode) async {
     try {
       final snapshot = await FirebaseFirestore.instance
@@ -72,12 +94,10 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage>
           .where('barcode', isEqualTo: barcode)
           .limit(1)
           .get();
-
       if (snapshot.docs.isEmpty) return null;
 
       final doc = snapshot.docs.first;
       final data = doc.data();
-
       return {
         'id': doc.id,
         'barcode': data['barcode']?.toString() ?? '',
@@ -85,7 +105,7 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage>
         'category': data['category'] ?? 'Other',
         'shelfLife': data['shelfLife'] ?? 7,
         'imageUrl': data['imageUrl'] ?? '',
-        'unit': data['unit'] ?? 'ชิ้น',
+        'unit': data['unit'] ?? 'kg', // ✅ ดีฟอลต์ให้เป็น kg
         'brand': data['brand'] ?? '',
       };
     } catch (e) {
@@ -94,69 +114,50 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage>
     }
   }
 
-  /// 🧊 เพิ่มสินค้าเข้าตู้เย็น (รวม URL ของรูป)
-  Future<void> _addToFridge(Map<String, dynamic> product, String? imageUrl) async {
+  Future<void> _addToFridge(
+      Map<String, dynamic> product, String? imageUrl) async {
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) throw Exception('User not logged in');
 
-      final existing = await FirebaseFirestore.instance
-          .collection('Fridge')
-          .where('userId', isEqualTo: user.uid)
-          .where('productId', isEqualTo: product['id'])
-          .limit(1)
-          .get();
+      final String unit = (product['unit'] ?? 'kg').toString().toLowerCase();
+      const double baseQty = 1.0; // สแกน 1 ชิ้น/แพ็ค = 1 unit
+      // ✅ ถ้า unit ไม่รู้จัก จะคืน baseQty (ถือเป็น kg)
+      final double qtyKg = QuantityConverter.toKg(baseQty, unit);
 
-      if (existing.docs.isNotEmpty) {
-        await FirebaseFirestore.instance
-            .collection('Fridge')
-            .doc(existing.docs.first.id)
-            .update({
-          'quantity': FieldValue.increment(1),
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
-        print('📈 Updated existing product quantity');
-      } else {
-        await FirebaseFirestore.instance.collection('Fridge').add({
-          'userId': user.uid,
-          'productId': product['id'],
-          'productName': product['name'],
-          'barcode': product['barcode'],
-          'category': product['category'],
-          'quantity': 1,
-          'addedAt': FieldValue.serverTimestamp(),
-          'updatedAt': FieldValue.serverTimestamp(),
-          'expiryDate': DateTime.now()
-              .add(Duration(days: product['shelfLife'] ?? 7))
-              .toIso8601String(),
-          'imageUrl': imageUrl ?? product['imageUrl'], // ✅ ใช้รูปใหม่ ถ้าไม่มีใช้ของเดิม
-          'unit': product['unit'],
-          'brand': product['brand'],
-        });
-        print('✅ Added new product to fridge');
-      }
+      final categoryKey = _mapCategory(product['category']);
+
+      await LogService.addFridgeItemAndLog(
+        userId: user.uid,
+        productId:
+            (product['id'] ?? 'manual_${DateTime.now().millisecondsSinceEpoch}')
+                .toString(),
+        productName: (product['name'] ?? 'Unknown Product').toString(),
+        category: categoryKey,
+        quantityKg: qtyKg,
+        imageUrl: imageUrl ?? (product['imageUrl'] ?? ''),
+        expiryDate:
+            DateTime.now().add(Duration(days: product['shelfLife'] ?? 7)),
+      );
+      print('✅ Added & Logged');
     } catch (e) {
-      print('🚨 Error adding to fridge: $e');
+      print('🚨 Error adding to fridge & log: $e');
+      rethrow;
     }
   }
 
   Future<void> _handleBarcodeDetected(String code) async {
     if (_isDialogShown || _isProcessing) return;
-
     setState(() {
       _isProcessing = true;
       _isDialogShown = true;
     });
 
     try {
-      print('🎯 Detected barcode: $code');
-
       final product = await _getProductByBarcode(code);
-
       if (product != null) {
-        final imageUrl = await _captureAndUploadImage(); // 📸 ถ่ายและอัปโหลด
+        final imageUrl = await _captureAndUploadImage();
         await _addToFridge(product, imageUrl);
-
         if (!mounted) return;
         _showSuccessDialog(product['name']);
       } else {
@@ -169,7 +170,6 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage>
     }
   }
 
-  /// ✅ Dialog สแกนสำเร็จ
   void _showSuccessDialog(String productName) {
     showDialog(
       context: context,
@@ -193,7 +193,6 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage>
     );
   }
 
-  /// ⚠️ Dialog ไม่พบสินค้า
   void _showProductNotFoundDialog(String barcode) {
     showDialog(
       context: context,
@@ -216,7 +215,6 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage>
     );
   }
 
-  /// ❌ Dialog Error
   void _showErrorDialog(dynamic error) {
     showDialog(
       context: context,
@@ -239,7 +237,6 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage>
     );
   }
 
-  /// 📷 UI สแกน
   @override
   Widget build(BuildContext context) {
     final size = MediaQuery.of(context).size;
@@ -276,7 +273,6 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage>
     );
   }
 
-  /// 🎞️ แอนิเมชันกรอบสแกน
   Widget _buildScannerOverlay(Size size, double scanAreaSize) {
     return Stack(
       children: [
@@ -317,25 +313,19 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage>
                   (scanAreaSize * _animation.value),
               left: size.width * 0.5 - scanAreaSize / 2,
               child: Container(
-                width: scanAreaSize,
-                height: 2,
-                color: Colors.greenAccent,
-              ),
+                  width: scanAreaSize, height: 2, color: Colors.greenAccent),
             );
           },
         ),
-        Positioned(
+        const Positioned(
           bottom: 100,
           left: 0,
           right: 0,
-          child: const Text(
+          child: Text(
             'วางบาร์โค้ดหรือ QR Code ภายในกรอบ',
             textAlign: TextAlign.center,
             style: TextStyle(
-              color: Colors.white,
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-            ),
+                color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
           ),
         ),
       ],

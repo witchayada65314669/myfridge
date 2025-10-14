@@ -1,3 +1,5 @@
 {
-    "cmake.sourceDirectory": "D:/Project/myfridge_test/windows"
+    "cmake.sourceDirectory": "D:/Project/myfridge_test/windows",
+    "vscode-pets.disableEffects": false,
+    "vscode-pets.theme": "autumn"
 }

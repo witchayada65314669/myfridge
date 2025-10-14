@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'home_page.dart';
+import 'package:myfridge_test/home_page.dart';
 import 'create_page.dart';
 
 class LoginPage extends StatefulWidget {

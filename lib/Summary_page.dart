@@ -1,119 +1,122 @@
-// lib/summary_page.dart
 import 'dart:math' as math;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
 
-/// คู่สีการ์ด
+import 'fridge_log_entry.dart'; // โมเดล typed ของ FridgeLog
+
+// ===== Utils =====
 class CardGradient {
   final Color c1, c2;
   const CardGradient(this.c1, this.c2);
 }
 
-/// โมเดลแท่งกราฟ (หลังรวมยอดต่อ productName)
 class BarItem {
   final String name;
   final double kg;
   BarItem(this.name, this.kg);
 }
 
+// แสดงตัวเลขแบบ 1 ตำแหน่ง หากลงตัวให้ตัด .0 ออก
+String formatKg(double v) {
+  final s = v.toStringAsFixed(1);
+  return s.endsWith('.0') ? v.toStringAsFixed(0) : s;
+}
+
 class SummaryPage extends StatefulWidget {
   final String userId;
   const SummaryPage({super.key, required this.userId});
-
   @override
   State<SummaryPage> createState() => _SummaryPageState();
 }
 
 class _SummaryPageState extends State<SummaryPage> {
-  // ====== Month filter (server-side) ======
-  DateTime _selectedMonth = DateTime(
-    DateTime.now().year,
-    DateTime.now().month,
-    1,
-  );
-  bool _allTime = false;
+  // ====== Filters ======
+  DateTime _selectedMonth =
+      DateTime(DateTime.now().year, DateTime.now().month, 1);
+  bool _allTime = true;
 
-  // ====== Meat sub filter (no seafood here) ======
+  // ย่อยของ Meat
   final List<String> meatTypes = const ['all', 'pork', 'beef', 'chicken'];
   String selectedMeat = 'all';
 
-  // แยกหมวด
-  static const meatSet = {'pork', 'beef', 'chicken', 'meat'};
-  static const seafoodSet = {'seafood'};
+  // Firestore collection (typed)
+  late final CollectionReference<FridgeLogEntry> _logCol = FirebaseFirestore
+      .instance
+      .collection('FridgeLog')
+      .withConverter<FridgeLogEntry>(
+        fromFirestore: FridgeLogEntry.fromFirestore,
+        toFirestore: FridgeLogEntry.toFirestore,
+      );
 
-  // ---------- SERVER-SIDE STREAM ----------
-  /// ดึงข้อมูลจาก Firestore ตามเดือนที่เลือก (หรือทั้งหมดถ้า _allTime)
-  Stream<List<Map<String, dynamic>>> _itemsStream() {
-    final col = FirebaseFirestore.instance.collection('Fridge');
-
-    if (_allTime) {
-      // หมดทุกเดือน
-      return col
-          .where('userId', isEqualTo: widget.userId)
-          // ถ้าแน่ใจว่าเอกสารทุกชิ้นมี addedAt ให้เปิด orderBy เพื่อผลลัพธ์นิ่งและเร็วขึ้น
-          .orderBy('addedAt', descending: true)
-          .snapshots()
-          .map((s) => s.docs.map((d) => d.data()).toList());
-    }
-
-    final start = DateTime(_selectedMonth.year, _selectedMonth.month, 1);
-    final end = DateTime(_selectedMonth.year, _selectedMonth.month + 1, 1);
-
-    return col
+  // ====== Stream (Safe mode ตลอด: query แค่ userId แล้วกรองบนเครื่อง) ======
+  Stream<List<FridgeLogEntry>> _itemsStream() {
+    return _logCol
         .where('userId', isEqualTo: widget.userId)
-        .where('addedAt', isGreaterThanOrEqualTo: Timestamp.fromDate(start))
-        .where('addedAt', isLessThan: Timestamp.fromDate(end))
-        .orderBy('addedAt', descending: true)
         .snapshots()
-        .map((s) => s.docs.map((d) => d.data()).toList());
+        .map((s) {
+      final all = s.docs.map((d) => d.data()).toList()
+        ..removeWhere((e) => e.eventType.name != 'added');
+
+      if (_allTime) {
+        all.sort((a, b) => b.eventAt.compareTo(a.eventAt));
+        return all;
+      }
+      final start = DateTime(_selectedMonth.year, _selectedMonth.month, 1);
+      final end = DateTime(_selectedMonth.year, _selectedMonth.month + 1, 1);
+      final filtered = all
+          .where((e) => !e.eventAt.isBefore(start) && e.eventAt.isBefore(end))
+          .toList()
+        ..sort((a, b) => b.eventAt.compareTo(a.eventAt));
+      return filtered;
+    });
   }
 
-  // รวมยอด kg ตามชื่อสินค้า
-  List<BarItem> _aggregateByName(List<Map<String, dynamic>> raw) {
+  // ===== Aggregations =====
+  List<BarItem> _aggregateByName(List<FridgeLogEntry> raw) {
     final map = <String, double>{};
-    for (final m in raw) {
-      final name = (m['productName'] ?? m['name'] ?? 'item').toString();
-      final q = m['quantity'];
-      final kg =
-          (q is num) ? q.toDouble() : double.tryParse('$q') ?? 0.0; // kg เสมอ
-      map[name] = (map[name] ?? 0) + kg;
+    for (final e in raw) {
+      // ✅ normalize ชื่อ: ตัดช่องว่างหัวท้าย & ยุบช่องว่างซ้ำ
+      final name = e.productName.trim().replaceAll(RegExp(r'\s+'), ' ');
+      map[name] = (map[name] ?? 0) + e.quantityKg;
     }
     final list = map.entries.map((e) => BarItem(e.key, e.value)).toList();
-    // หากอยากเรียงตามปริมาณ เปิดบรรทัดนี้: list.sort((a,b)=>b.kg.compareTo(a.kg));
+    list.sort((a, b) => b.kg.compareTo(a.kg));
     return list;
   }
 
-  double _sumKg(Iterable<Map<String, dynamic>> it) {
-    double t = 0;
-    for (final m in it) {
-      final q = m['quantity'];
-      final kg = (q is num) ? q.toDouble() : double.tryParse('$q') ?? 0.0;
-      t += kg;
-    }
-    return t;
-  }
+  double _sumKg(Iterable<FridgeLogEntry> it) =>
+      it.fold<double>(0.0, (p, e) => p + e.quantityKg);
 
-  Map<String, List<Map<String, dynamic>>> _splitCategories(
-    List<Map<String, dynamic>> items,
-  ) {
+  Map<String, List<FridgeLogEntry>> _splitCategories(
+      List<FridgeLogEntry> items) {
     final g = {
-      'Meat': <Map<String, dynamic>>[],
-      'Vegetable': <Map<String, dynamic>>[],
-      'Fruit': <Map<String, dynamic>>[],
-      'Seafood': <Map<String, dynamic>>[],
+      'Meat': <FridgeLogEntry>[],
+      'Vegetable': <FridgeLogEntry>[],
+      'Fruit': <FridgeLogEntry>[],
+      'Seafood': <FridgeLogEntry>[],
+      'Other': <FridgeLogEntry>[],
     };
-    for (final m in items) {
-      final cat = (m['category'] ?? '').toString().toLowerCase();
-      if (meatSet.contains(cat)) {
-        g['Meat']!.add(m);
-      } else if (seafoodSet.contains(cat)) {
-        g['Seafood']!.add(m);
-      } else if (cat == 'vegetable' || cat == 'veggie') {
-        g['Vegetable']!.add(m);
-      } else if (cat == 'fruit' || cat == 'fruits') {
-        g['Fruit']!.add(m);
+    for (final e in items) {
+      switch (e.category) {
+        case FoodCategory.pork:
+        case FoodCategory.beef:
+        case FoodCategory.chicken:
+        case FoodCategory.meat:
+          g['Meat']!.add(e);
+          break;
+        case FoodCategory.seafood:
+          g['Seafood']!.add(e);
+          break;
+        case FoodCategory.vegetable:
+          g['Vegetable']!.add(e);
+          break;
+        case FoodCategory.fruit:
+          g['Fruit']!.add(e);
+          break;
+        default:
+          g['Other']!.add(e);
       }
     }
     return g;
@@ -129,22 +132,19 @@ class _SummaryPageState extends State<SummaryPage> {
         return const CardGradient(Color(0xFFE3D7FF), Color(0xFFD1B9FF));
       case 'Seafood':
         return const CardGradient(Color(0xFF8FA9FF), Color(0xFF6B85E6));
+      case 'Other':
+        return const CardGradient(Color(0xFF9E9E9E), Color(0xFF7E7E7E));
       default:
         return const CardGradient(Color(0xFF9E9E9E), Color(0xFF7E7E7E));
     }
   }
 
-  // ====== Month selector controls ======
-  void _prevMonth() {
-    setState(() {
-      _allTime = false;
-      _selectedMonth = DateTime(
-        _selectedMonth.year,
-        _selectedMonth.month - 1,
-        1,
-      );
-    });
-  }
+  // ===== Month controls =====
+  void _prevMonth() => setState(() {
+        _allTime = false;
+        _selectedMonth =
+            DateTime(_selectedMonth.year, _selectedMonth.month - 1, 1);
+      });
 
   void _nextMonth() {
     final now = DateTime.now();
@@ -180,48 +180,53 @@ class _SummaryPageState extends State<SummaryPage> {
     return Scaffold(
       backgroundColor: Colors.white,
       body: SafeArea(
-        child: StreamBuilder<List<Map<String, dynamic>>>(
-          stream: _itemsStream(), // ✅ server-side query ตามเดือน/All
+        child: StreamBuilder<List<FridgeLogEntry>>(
+          stream: _itemsStream(),
           builder: (context, snap) {
+            if (snap.hasError) {
+              return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Text(
+                    'โหลดข้อมูลไม่สำเร็จ: ${snap.error}',
+                    style: const TextStyle(color: Colors.redAccent),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              );
+            }
+
             final loading = snap.connectionState == ConnectionState.waiting;
-            final items = snap.data ?? const <Map<String, dynamic>>[];
+            final items = snap.data ?? const <FridgeLogEntry>[];
             final grouped = _splitCategories(items);
 
-            // เตรียม Meat ตาม filter
+            // Meat + filter
             final meatAll = grouped['Meat']!;
-            final meatFiltered =
-                (selectedMeat == 'all')
-                    ? meatAll
-                    : meatAll
-                        .where(
-                          (m) => (m['category'] ?? '')
-                              .toString()
-                              .toLowerCase()
-                              .contains(selectedMeat),
-                        )
-                        .toList();
+            final meatFiltered = (selectedMeat == 'all')
+                ? meatAll
+                : meatAll
+                    .where((e) => e.category.name == selectedMeat)
+                    .toList();
+            final double meatTotalShown = _sumKg(meatFiltered);
 
-            // totals สำหรับ progress ล่าง
+            // totals (Meat ใช้ยอดตามตัวกรอง)
             final totals = {
-              'Meat': _sumKg(meatAll),
+              'Meat': meatTotalShown,
               'Vegetable': _sumKg(grouped['Vegetable']!),
               'Fruit': _sumKg(grouped['Fruit']!),
               'Seafood': _sumKg(grouped['Seafood']!),
+              'Other': _sumKg(grouped['Other']!),
             };
-            final maxTotal =
-                totals.values.isEmpty
-                    ? 1.0
-                    : totals.values
-                        .reduce((a, b) => a > b ? a : b)
-                        .clamp(1.0, double.infinity);
+            final maxTotal = totals.values.isEmpty
+                ? 1.0
+                : totals.values
+                    .reduce((a, b) => a > b ? a : b)
+                    .clamp(1.0, double.infinity);
 
-            Widget buildCard(
-              String cat,
-              List<Map<String, dynamic>> raw, {
-              Widget? trailing,
-            }) {
+            Widget buildCard(String cat, List<FridgeLogEntry> raw,
+                {Widget? trailing}) {
               final grad = _cardGradient(cat);
-              final total = (cat == 'Meat') ? totals['Meat']! : _sumKg(raw);
+              final total = (cat == 'Meat') ? meatTotalShown : _sumKg(raw);
               final bars = _aggregateByName(cat == 'Meat' ? meatFiltered : raw);
               final progress = (total / maxTotal).clamp(0.0, 1.0);
               return _CategoryCard(
@@ -244,85 +249,64 @@ class _SummaryPageState extends State<SummaryPage> {
                   Row(
                     children: [
                       IconButton(
-                        icon: const Icon(Icons.arrow_back),
-                        onPressed: () => Navigator.pop(context),
-                      ),
-                      const Text(
-                        "summary",
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
+                          icon: const Icon(Icons.arrow_back),
+                          onPressed: () => Navigator.pop(context)),
+                      const Text("summary",
+                          style: TextStyle(
+                              fontSize: 20, fontWeight: FontWeight.bold)),
                     ],
                   ),
                   const SizedBox(height: 8),
 
-                  // 🔎 ตัวกรองเดือน (server-side)
+                  // Month filter + All
                   Row(
                     children: [
                       IconButton(
-                        icon: const Icon(Icons.chevron_left),
-                        onPressed: _allTime ? null : _prevMonth,
-                      ),
+                          icon: const Icon(Icons.chevron_left),
+                          onPressed: _allTime ? null : _prevMonth),
                       GestureDetector(
                         onTap: _pickMonth,
                         child: Container(
                           padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 8,
-                          ),
+                              horizontal: 12, vertical: 8),
                           decoration: BoxDecoration(
                             color: const Color(0xFFF1E9FF),
                             borderRadius: BorderRadius.circular(16),
                           ),
                           child: Row(
                             children: [
-                              Icon(
-                                Icons.calendar_today,
-                                size: 16,
-                                color: Colors.deepPurple.shade400,
-                              ),
+                              Icon(Icons.calendar_today,
+                                  size: 16, color: Colors.deepPurple.shade400),
                               const SizedBox(width: 8),
-                              Text(
-                                _allTime ? 'All time' : monthLabel,
-                                style: TextStyle(
-                                  color: Colors.deepPurple.shade600,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
+                              Text(_allTime ? 'All time' : monthLabel,
+                                  style: TextStyle(
+                                      color: Colors.deepPurple.shade600,
+                                      fontWeight: FontWeight.w600)),
                             ],
                           ),
                         ),
                       ),
                       IconButton(
-                        icon: const Icon(Icons.chevron_right),
-                        onPressed: _allTime ? null : _nextMonth,
-                      ),
+                          icon: const Icon(Icons.chevron_right),
+                          onPressed: _allTime ? null : _nextMonth),
                       const Spacer(),
                       GestureDetector(
                         onTap: () => setState(() => _allTime = !_allTime),
                         child: Container(
                           padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 8,
-                          ),
+                              horizontal: 12, vertical: 8),
                           decoration: BoxDecoration(
                             color: _allTime ? Colors.deepPurple : Colors.white,
                             border: Border.all(
-                              color: Colors.deepPurple.shade300,
-                              width: 1,
-                            ),
+                                color: Colors.deepPurple.shade300, width: 1),
                             borderRadius: BorderRadius.circular(18),
                           ),
-                          child: Text(
-                            'All',
-                            style: TextStyle(
-                              color:
-                                  _allTime ? Colors.white : Colors.deepPurple,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
+                          child: Text('All',
+                              style: TextStyle(
+                                color:
+                                    _allTime ? Colors.white : Colors.deepPurple,
+                                fontWeight: FontWeight.w700,
+                              )),
                         ),
                       ),
                     ],
@@ -335,15 +319,15 @@ class _SummaryPageState extends State<SummaryPage> {
                       child: Center(child: CircularProgressIndicator()),
                     ),
 
-                  // การ์ดตามหมวด
+                  // Cards
                   buildCard(
                     'Meat',
                     grouped['Meat']!,
                     trailing: _PillDropdown(
                       value: selectedMeat,
                       items: meatTypes,
-                      onChanged:
-                          (v) => setState(() => selectedMeat = v ?? 'all'),
+                      onChanged: (v) =>
+                          setState(() => selectedMeat = v ?? 'all'),
                     ),
                   ),
                   const SizedBox(height: 16),
@@ -352,6 +336,8 @@ class _SummaryPageState extends State<SummaryPage> {
                   buildCard('Fruit', grouped['Fruit']!),
                   const SizedBox(height: 16),
                   buildCard('Seafood', grouped['Seafood']!),
+                  const SizedBox(height: 16),
+                  buildCard('Other', grouped['Other']!),
                   const SizedBox(height: 8),
                 ],
               ),
@@ -363,7 +349,6 @@ class _SummaryPageState extends State<SummaryPage> {
   }
 }
 
-/// ปุ่มกรองแบบ pill มุมขวาบนของการ์ด (ใช้กับ Meat)
 class _PillDropdown extends StatelessWidget {
   final String value;
   final List<String> items;
@@ -386,23 +371,15 @@ class _PillDropdown extends StatelessWidget {
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String>(
           value: value,
-          icon: const Icon(
-            Icons.keyboard_arrow_down,
-            size: 18,
-            color: Color(0xFF6C35B7),
-          ),
-          items:
-              items
-                  .map(
-                    (e) => DropdownMenuItem(
-                      value: e,
-                      child: Text(
-                        e,
-                        style: const TextStyle(color: Color(0xFF6C35B7)),
-                      ),
-                    ),
-                  )
-                  .toList(),
+          icon: const Icon(Icons.keyboard_arrow_down,
+              size: 18, color: Color(0xFF6C35B7)),
+          items: items
+              .map((e) => DropdownMenuItem<String>(
+                    value: e,
+                    child: Text(e,
+                        style: const TextStyle(color: Color(0xFF6C35B7))),
+                  ))
+              .toList(),
           onChanged: onChanged,
         ),
       ),
@@ -410,14 +387,13 @@ class _PillDropdown extends StatelessWidget {
   }
 }
 
-/// การ์ดสรุปตามหมวด + กราฟ
 class _CategoryCard extends StatelessWidget {
   final String title;
   final double totalKg;
   final List<BarItem> bars;
   final Color color1, color2;
-  final Widget? trailing; // ใช้กับ Meat
-  final double progress; // 0..1 สำหรับแถบโปรเกรสล่าง
+  final Widget? trailing;
+  final double progress;
 
   const _CategoryCard({
     required this.title,
@@ -434,7 +410,7 @@ class _CategoryCard extends StatelessWidget {
     final hasData = bars.isNotEmpty;
     final maxBar =
         hasData ? bars.map((b) => b.kg).reduce((a, b) => a > b ? a : b) : 5.0;
-    final maxY = hasData ? maxBar * 1.5 : 5.0; // เผื่อพื้นที่ตัวเลขบนแท่ง
+    final maxY = hasData ? maxBar * 1.5 : 5.0;
 
     return Container(
       width: double.infinity,
@@ -443,229 +419,192 @@ class _CategoryCard extends StatelessWidget {
         gradient: LinearGradient(colors: [color1, color2]),
         borderRadius: BorderRadius.circular(28),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                title,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(title,
                 style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              if (trailing != null) trailing!,
-            ],
-          ),
-          const SizedBox(height: 4),
-          Text(
-            "total used ${totalKg.toStringAsFixed(0)} kg.",
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 15,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 10),
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w800)),
+            if (trailing != null) trailing!,
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          "total used ${formatKg(totalKg)} kg.",
+          style: const TextStyle(
+              color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 10),
 
-          // Chart (fixed height; scroll horizontally if many bars)
-          SizedBox(
-            height: 180,
-            child:
-                hasData
-                    ? LayoutBuilder(
-                      builder: (context, c) {
-                        const double barWidth = 16;
-                        const double gap = 20;
-                        final contentWidth = math.max(
-                          bars.length * (barWidth + gap) + 40,
-                          c.maxWidth,
-                        );
+        // Chart
+        SizedBox(
+          height: 180,
+          child: hasData
+              ? LayoutBuilder(builder: (context, c) {
+                  const double barWidth = 16;
+                  const double gap = 20;
+                  final contentWidth =
+                      math.max(bars.length * (barWidth + gap) + 40, c.maxWidth);
 
-                        final chart = SizedBox(
-                          width: contentWidth,
-                          child: BarChart(
-                            BarChartData(
-                              maxY: maxY,
-                              alignment: BarChartAlignment.spaceAround,
-                              barTouchData: BarTouchData(enabled: false),
-                              gridData: FlGridData(
-                                show: true,
-                                drawVerticalLine: false,
-                                drawHorizontalLine: true,
-                                getDrawingHorizontalLine:
-                                    (_) => FlLine(
-                                      color: Colors.white.withOpacity(0.75),
-                                      strokeWidth: 1,
-                                      dashArray: const [6, 6], // เส้นประ
-                                    ),
-                              ),
-                              // เส้นฐานหนา
-                              extraLinesData: ExtraLinesData(
-                                horizontalLines: [
-                                  HorizontalLine(
-                                    y: 0,
-                                    color: Colors.white.withOpacity(0.9),
-                                    strokeWidth: 2,
-                                  ),
-                                ],
-                              ),
-                              borderData: FlBorderData(show: false),
-                              titlesData: FlTitlesData(
-                                leftTitles: const AxisTitles(
-                                  sideTitles: SideTitles(showTitles: false),
-                                ),
-                                rightTitles: const AxisTitles(
-                                  sideTitles: SideTitles(showTitles: false),
-                                ),
-                                topTitles: const AxisTitles(
-                                  sideTitles: SideTitles(showTitles: false),
-                                ),
-                                bottomTitles: AxisTitles(
-                                  sideTitles: SideTitles(
-                                    reservedSize: 24,
-                                    showTitles: true,
-                                    getTitlesWidget: (value, _) {
-                                      final i = value.toInt();
-                                      if (i >= 0 && i < bars.length) {
-                                        return Padding(
-                                          padding: const EdgeInsets.only(
-                                            top: 2,
-                                          ),
-                                          child: Text(
-                                            bars[i].name,
-                                            style: const TextStyle(
-                                              color: Colors.white70,
-                                              fontSize: 12,
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                        );
-                                      }
-                                      return const SizedBox.shrink();
-                                    },
-                                  ),
-                                ),
-                              ),
-                              barGroups: List.generate(bars.length, (i) {
-                                final isPrimary = i == 0;
-                                return BarChartGroupData(
-                                  x: i,
-                                  barRods: [
-                                    BarChartRodData(
-                                      toY: bars[i].kg,
-                                      width: barWidth,
-                                      gradient: LinearGradient(
-                                        colors:
-                                            isPrimary
-                                                ? const [
-                                                  Color(0xFF3F5BD7),
-                                                  Color(0xFFBFD3FF),
-                                                ]
-                                                : const [
-                                                  Color(0xFFEFF2FF),
-                                                  Colors.white,
-                                                ],
-                                        begin: Alignment.bottomCenter,
-                                        end: Alignment.topCenter,
-                                      ),
-                                      borderRadius: BorderRadius.circular(6),
-                                    ),
-                                  ],
-                                );
-                              }),
-                            ),
+                  final chart = SizedBox(
+                    width: contentWidth,
+                    child: BarChart(
+                      BarChartData(
+                        maxY: maxY,
+                        alignment: BarChartAlignment.spaceAround,
+                        barTouchData: BarTouchData(enabled: false),
+                        gridData: FlGridData(
+                          show: true,
+                          drawVerticalLine: false,
+                          drawHorizontalLine: true,
+                          getDrawingHorizontalLine: (_) => FlLine(
+                            color: Colors.white.withOpacity(0.75),
+                            strokeWidth: 1,
+                            dashArray: const [6, 6],
                           ),
-                        );
-
-                        // ป้าย “x kg.” อยู่กึ่งกลางแนวนอนของแท่ง (สูตรสำหรับ spaceAround)
-                        const double _labelLift = 0.22;
-                        final int n = bars.length;
-                        final labels = List.generate(n, (i) {
-                          final y = bars[i].kg;
-                          final yFrac = (y / maxY).clamp(0.0, 1.0);
-                          final xFrac = (i + 1) / (n + 1); // center ของแท่ง
-                          final yAlign = (1 - 2 * yFrac - _labelLift).clamp(
-                            -0.98,
-                            0.98,
-                          );
-
-                          return Align(
-                            alignment: Alignment(-1 + 2 * xFrac, yAlign),
-                            child: Text(
-                              "${y.toStringAsFixed(0)} kg.",
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          );
-                        });
-
-                        return SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 6),
-                            child: SizedBox(
-                              width: contentWidth,
-                              child: Stack(children: [chart, ...labels]),
-                            ),
-                          ),
-                        );
-                      },
-                    )
-                    : const Center(
-                      child: Text(
-                        "No data",
-                        style: TextStyle(color: Colors.white70, fontSize: 14),
-                      ),
-                    ),
-          ),
-
-          const SizedBox(height: 12),
-
-          // Progress bar ล่าง (สไตล์สไลเดอร์)
-          LayoutBuilder(
-            builder: (context, c) {
-              const trackH = 10.0;
-              const thumbW = 56.0;
-              final left = (c.maxWidth - thumbW) * progress;
-              return SizedBox(
-                height: 14,
-                child: Stack(
-                  children: [
-                    Container(
-                      height: trackH,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.25),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                    ),
-                    Positioned(
-                      left: left,
-                      top: 2,
-                      child: Container(
-                        width: thumbW,
-                        height: trackH - 2.5,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.75),
-                          borderRadius: BorderRadius.circular(20),
                         ),
+                        extraLinesData: ExtraLinesData(horizontalLines: [
+                          HorizontalLine(
+                              y: 0,
+                              color: Colors.white.withOpacity(0.9),
+                              strokeWidth: 2),
+                        ]),
+                        borderData: FlBorderData(show: false),
+                        titlesData: FlTitlesData(
+                          leftTitles: const AxisTitles(
+                              sideTitles: SideTitles(showTitles: false)),
+                          rightTitles: const AxisTitles(
+                              sideTitles: SideTitles(showTitles: false)),
+                          topTitles: const AxisTitles(
+                              sideTitles: SideTitles(showTitles: false)),
+                          bottomTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              reservedSize: 24,
+                              showTitles: true,
+                              getTitlesWidget: (value, _) {
+                                final i = value.toInt();
+                                if (i >= 0 && i < bars.length) {
+                                  return Padding(
+                                    padding: const EdgeInsets.only(top: 2),
+                                    child: Text(
+                                      bars[i].name,
+                                      style: const TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  );
+                                }
+                                return const SizedBox.shrink();
+                              },
+                            ),
+                          ),
+                        ),
+                        barGroups: List.generate(bars.length, (i) {
+                          final isPrimary = i == 0;
+                          return BarChartGroupData(
+                            x: i,
+                            barRods: [
+                              BarChartRodData(
+                                toY: bars[i].kg,
+                                width: barWidth,
+                                gradient: LinearGradient(
+                                  colors: isPrimary
+                                      ? const [
+                                          Color(0xFF3F5BD7),
+                                          Color(0xFFBFD3FF)
+                                        ]
+                                      : const [Color(0xFFEFF2FF), Colors.white],
+                                  begin: Alignment.bottomCenter,
+                                  end: Alignment.topCenter,
+                                ),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                            ],
+                          );
+                        }),
                       ),
                     ),
-                  ],
+                  );
+
+                  // labels บนแท่ง
+                  const double _labelLift = 0.22;
+                  final int n = bars.length;
+                  final labels = List.generate(n, (i) {
+                    final y = bars[i].kg;
+                    final yFrac = (y / maxY).clamp(0.0, 1.0);
+                    final xFrac = (i + 1) / (n + 1);
+                    final yAlign =
+                        (1 - 2 * yFrac - _labelLift).clamp(-0.98, 0.98);
+                    return Align(
+                      alignment: Alignment(-1 + 2 * xFrac, yAlign),
+                      child: Text(
+                        "${formatKg(y)} kg.",
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700),
+                      ),
+                    );
+                  });
+
+                  return SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      child: SizedBox(
+                        width: contentWidth,
+                        child: Stack(children: [chart, ...labels]),
+                      ),
+                    ),
+                  );
+                })
+              : const Center(
+                  child: Text("No data",
+                      style: TextStyle(color: Colors.white70, fontSize: 14)),
                 ),
-              );
-            },
-          ),
-        ],
-      ),
+        ),
+
+        const SizedBox(height: 12),
+
+        // Progress bar ด้านล่าง
+        LayoutBuilder(builder: (context, c) {
+          const trackH = 10.0;
+          const thumbW = 56.0;
+          final left = (c.maxWidth - thumbW) * progress;
+          return SizedBox(
+            height: 14,
+            child: Stack(
+              children: [
+                Container(
+                  height: trackH,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.25),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                ),
+                Positioned(
+                  left: left,
+                  top: 2,
+                  child: Container(
+                    width: thumbW,
+                    height: trackH - 2.5,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.75),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }),
+      ]),
     );
   }
 }
