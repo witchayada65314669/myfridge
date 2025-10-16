@@ -8,7 +8,6 @@ import 'package:myfridge_test/scanner.dart';
 import 'package:myfridge_test/Summary_page.dart';
 import 'package:myfridge_test/setting_page.dart';
 import 'package:myfridge_test/login_page.dart';
-import 'package:myfridge_test/emoji.dart';
 import 'package:myfridge_test/add_item_page.dart';
 import 'package:myfridge_test/notification_service.dart';
 
@@ -29,9 +28,9 @@ class _HomePageState extends State<HomePage> {
 
   String selectedCategory = 'All';
   final List<String> categories = ['All', 'Meat', 'Vegetable', 'Fruit', 'Seafood'];
-
   List<AppNotification> _notifications = [];
 
+  /// ✅ Stream ใช้ collection เดิมชื่อ "Fridge"
   Stream<QuerySnapshot> _getUserFoodStream() {
     if (_currentUser == null) return const Stream.empty();
     return _firestore
@@ -46,6 +45,7 @@ class _HomePageState extends State<HomePage> {
     _scheduleDailyReminder();
   }
 
+  /// ✅ แจ้งเตือนประจำวันของของใกล้หมดอายุ
   Future<void> _scheduleDailyReminder() async {
     final now = DateTime.now();
     final snapshot = await _firestore
@@ -66,7 +66,9 @@ class _HomePageState extends State<HomePage> {
     }
 
     await NotificationService.scheduleDailyNotification(
-        "🧊 สรุปของในตู้เย็นวันนี้", body);
+      "🧊 สรุปของในตู้เย็นวันนี้",
+      body,
+    );
   }
 
   String _normalizeCategory(String category) {
@@ -92,8 +94,6 @@ class _HomePageState extends State<HomePage> {
         return Colors.grey;
     }
   }
-
-  int get unreadNotifications => _notifications.length;
 
   List<AppNotification> _generateNotifications(List<FoodItem> items) {
     final now = DateTime.now();
@@ -122,21 +122,8 @@ class _HomePageState extends State<HomePage> {
       title = "🎉 ไม่มีของใกล้หมดอายุ";
       message = "ตู้เย็นของคุณยังสดใหม่อยู่เลย 😋";
     } else {
-      final n = _notifications.first;
-      final match = RegExp(r'(\d+)').firstMatch(n.message);
-      final dayCount = int.tryParse(match?.group(1) ?? "0") ?? 0;
-
-      String emoji;
-      if (dayCount == 0) {
-        emoji = "⚠️";
-      } else if (dayCount == 1) {
-        emoji = "⏳";
-      } else {
-        emoji = "🥦";
-      }
-
-      title = "$emoji ${n.title}";
-      message = "เหลือเวลาอีก $dayCount วันก่อนหมดอายุ";
+      title = "⏳ ของใกล้หมดอายุ ${_notifications.length} รายการ";
+      message = _notifications.map((n) => n.message).join("\n");
     }
 
     entry = OverlayEntry(
@@ -274,8 +261,6 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-
-      /// ✅ ปุ่มเพิ่มข้อมูล (กลับมาแล้ว!)
       floatingActionButton: FloatingActionButton(
         backgroundColor: const Color(0xFF6F398E),
         child: const Icon(Icons.add, color: Colors.white),
@@ -305,32 +290,12 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
       iconTheme: const IconThemeData(color: Color(0xFF6F398E)),
-      actions: [_buildNotificationIcon()],
-    );
-  }
-
-  Widget _buildNotificationIcon() {
-    return Stack(
-      children: [
+      actions: [
         IconButton(
           icon: const Icon(Icons.notifications_rounded,
               color: Color(0xFF6F398E), size: 30),
           onPressed: _showNotifications,
         ),
-        if (unreadNotifications > 0)
-          Positioned(
-            right: 6,
-            top: 6,
-            child: Container(
-              padding: const EdgeInsets.all(5),
-              decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
-              child: Text(
-                '$unreadNotifications',
-                style: const TextStyle(
-                    color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
-              ),
-            ),
-          ),
       ],
     );
   }
@@ -381,7 +346,7 @@ class _HomePageState extends State<HomePage> {
             Container(
               padding: const EdgeInsets.all(12),
               color: _getCategoryColor(_normalizeCategory(item.category))
-                  .withOpacity(0.85),
+                  .withValues(alpha: 0.85),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -443,7 +408,6 @@ class _HomePageState extends State<HomePage> {
             Text('หมวดหมู่: ${_normalizeCategory(item.category)}'),
             if (item.expirationDate != null)
               Text('วันหมดอายุ: ${DateFormat('dd/MM/yyyy').format(item.expirationDate!)}'),
-            if (item.weight != null) Text('น้ำหนัก: ${item.weight} kg'),
           ],
         ),
         actions: [

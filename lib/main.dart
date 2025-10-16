@@ -166,6 +166,7 @@ class WelcomePage extends StatelessWidget {
             color: textColor,
             fontSize: 16,
             fontWeight: FontWeight.w700,
+            
             fontFamily: 'Inter',
           ),
         ),
