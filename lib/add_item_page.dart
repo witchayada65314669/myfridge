@@ -21,7 +21,7 @@ class _AddItemPageState extends State<AddItemPage> {
   final quantityController = TextEditingController();
   String? _selectedCategory;
 
-  // ✅ เพิ่มตัวเลือกใหม่ (Beef, Pork, Chicken)
+  // ✅ ตัวเลือกหมวด — ใช้ตามฟอร์มเดิมของคุณ
   final List<String> categories = [
     'Beef',
     'Pork',
@@ -36,19 +36,23 @@ class _AddItemPageState extends State<AddItemPage> {
   final ImagePicker _picker = ImagePicker();
   bool _isProcessing = false;
 
+  /// ✅ map ชื่อใน UI → คีย์ที่ summary รองรับ
   String _mapCategory(String? ui) {
     switch ((ui ?? 'Other').toLowerCase()) {
       case 'beef':
+        return 'beef';
       case 'pork':
+        return 'pork';
       case 'chicken':
-      case 'meat':
-        return 'meat';
+        return 'chicken';
       case 'vegetable':
         return 'vegetable';
       case 'fruit':
         return 'fruit';
       case 'seafood':
         return 'seafood';
+      case 'meat':
+        return 'meat'; // เผื่ออนาคตมีตัวเลือกนี้
       default:
         return 'other';
     }
@@ -64,43 +68,47 @@ class _AddItemPageState extends State<AddItemPage> {
       final now = DateTime.now();
       final expirationDate = now.add(const Duration(days: 2));
 
-      // ✅ เพิ่มข้อมูลลง Firestore
+      final productName = nameController.text.trim();
+      final categoryKey = _mapCategory(_selectedCategory);
+      final qtyKg = double.tryParse(quantityController.text.trim()) ?? 1.0;
+
+      // 1) ✅ เพิ่มข้อมูลลง Fridge (ฟิลด์ให้ตรงมาตรฐาน: addedAt / expiryDate)
       final docRef = await FirebaseFirestore.instance.collection('Fridge').add({
         'userId': user.uid,
         'productId': 'manual_${now.millisecondsSinceEpoch}',
-        'productName': nameController.text.trim(),
+        'productName': productName,
         'barcode': '',
-        'category': _selectedCategory ?? 'Other',
-        'quantity': double.tryParse(quantityController.text.trim()) ?? 1.0,
+        'category': _selectedCategory ??
+            'Other', // เก็บชื่อ UI ได้ตามเดิม (หน้า Home ใช้อยู่)
+        'quantity': qtyKg, // เก็บเป็น kg ตามดีไซน์ใหม่
         'unit': 'kg',
         'imageUrl': '',
-        'createdAt': now,
-        'expirationDate': expirationDate,
+        'addedAt': now, // ถ้าอยากใช้ server time: FieldValue.serverTimestamp()
+        'expiryDate': expirationDate,
         'updatedAt': now,
       });
 
-      // ✅ ถ่ายรูปสินค้า (เหมือนหน้า Scanner)
+      // 2) ✅ ถ่ายรูปสินค้า (optional — เหมือนหน้า Scanner)
+      String imageUrl = '';
       final photo = await _picker.pickImage(source: ImageSource.camera);
       if (photo != null) {
         final imageFile = File(photo.path);
-
-        final ref = _storage
-            .ref()
-            .child('Fridge/${user.uid}/${DateTime.now().millisecondsSinceEpoch}.jpg');
+        final ref = _storage.ref().child(
+            'Fridge/${user.uid}/${DateTime.now().millisecondsSinceEpoch}.jpg');
         await ref.putFile(imageFile);
-        final imageUrl = await ref.getDownloadURL();
-
+        imageUrl = await ref.getDownloadURL();
         await docRef.update({'imageUrl': imageUrl});
       }
 
-      // ✅ Log สำหรับ Summary
+      // 3) ✅ เขียน Log สำหรับ Summary (อ่านจาก FridgeLog)
       await LogService.logAddedOnly(
         userId: user.uid,
         productId: 'manual_${now.millisecondsSinceEpoch}',
-        productName: nameController.text.trim(),
-        category: _mapCategory(_selectedCategory),
-        quantityKg: double.tryParse(quantityController.text.trim()) ?? 1.0,
-        fridgeDocId: docRef.id,
+        productName: productName,
+        category: categoryKey, // ใช้ key ที่ summary รองรับ
+        quantityKg: qtyKg,
+        fridgeDocId:
+            docRef.id, // ผูกกลับเอกสารใน Fridge (กันซ้ำ/ซ่อมย้อนหลังได้)
       );
 
       if (!mounted) return;
@@ -108,14 +116,15 @@ class _AddItemPageState extends State<AddItemPage> {
         content: Text('✅ เพิ่มข้อมูลและถ่ายรูปเรียบร้อยแล้ว!'),
         backgroundColor: Colors.green,
       ));
-
       Navigator.pop(context, true);
     } on TimeoutException {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
         content: Text('⏱️ การเชื่อมต่อ Firebase ใช้เวลานานเกินไป'),
         backgroundColor: Colors.orange,
       ));
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text('❌ เกิดข้อผิดพลาด: $e'),
         backgroundColor: Colors.redAccent,
@@ -151,9 +160,10 @@ class _AddItemPageState extends State<AddItemPage> {
                 borderRadius: BorderRadius.circular(20),
                 boxShadow: [
                   BoxShadow(
-                      color: Colors.black.withOpacity(0.1),
-                      blurRadius: 10,
-                      offset: const Offset(0, 5))
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 10,
+                    offset: const Offset(0, 5),
+                  ),
                 ],
               ),
               child: Form(
@@ -175,8 +185,9 @@ class _AddItemPageState extends State<AddItemPage> {
                           filled: true,
                           fillColor: Colors.grey.shade100,
                         ),
-                        validator: (v) =>
-                            v!.isEmpty ? 'กรุณากรอกชื่ออาหาร' : null,
+                        validator: (v) => v == null || v.trim().isEmpty
+                            ? 'กรุณากรอกชื่ออาหาร'
+                            : null,
                       ),
                       const SizedBox(height: 16),
                       DropdownButtonFormField<String>(
@@ -201,7 +212,8 @@ class _AddItemPageState extends State<AddItemPage> {
                       const SizedBox(height: 16),
                       TextFormField(
                         controller: quantityController,
-                        keyboardType: TextInputType.number,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
                         decoration: InputDecoration(
                           prefixIcon:
                               const Icon(Icons.scale, color: Colors.deepPurple),
@@ -211,14 +223,20 @@ class _AddItemPageState extends State<AddItemPage> {
                           filled: true,
                           fillColor: Colors.grey.shade100,
                         ),
-                        validator: (v) =>
-                            v == null || v.isEmpty ? 'กรุณากรอกน้ำหนัก' : null,
+                        validator: (v) {
+                          final d = double.tryParse(v ?? '');
+                          if (d == null || d <= 0)
+                            return 'กรุณากรอกน้ำหนักมากกว่า 0';
+                          return null;
+                        },
                       ),
                       const SizedBox(height: 30),
                       _infoRow(Icons.calendar_today, 'เพิ่มเมื่อ',
                           DateFormat('dd/MM/yyyy HH:mm').format(now)),
                       const SizedBox(height: 10),
-                      _infoRow(Icons.timer, 'หมดอายุโดยประมาณ',
+                      _infoRow(
+                          Icons.timer,
+                          'หมดอายุโดยประมาณ',
                           DateFormat('dd/MM/yyyy HH:mm')
                               .format(expirationDate)),
                       const SizedBox(height: 35),
@@ -232,14 +250,15 @@ class _AddItemPageState extends State<AddItemPage> {
                             padding: const EdgeInsets.symmetric(vertical: 14),
                           ),
                           onPressed: _addItem,
-                          icon: const Icon(Icons.camera_alt, color: Colors.white),
+                          icon:
+                              const Icon(Icons.camera_alt, color: Colors.white),
                           label: const Text('เพิ่มรายการและถ่ายรูป',
                               style: TextStyle(
                                   color: Colors.white,
                                   fontSize: 18,
                                   fontWeight: FontWeight.bold)),
                         ),
-                      )
+                      ),
                     ],
                   ),
                 ),
@@ -255,8 +274,10 @@ class _AddItemPageState extends State<AddItemPage> {
                   children: [
                     CircularProgressIndicator(color: Colors.white),
                     SizedBox(height: 10),
-                    Text("กำลังบันทึกและอัปโหลดรูป...",
-                        style: TextStyle(color: Colors.white)),
+                    Text(
+                      "กำลังบันทึกและอัปโหลดรูป...",
+                      style: TextStyle(color: Colors.white),
+                    ),
                   ],
                 ),
               ),
@@ -279,8 +300,11 @@ class _AddItemPageState extends State<AddItemPage> {
           Icon(icon, color: const Color(0xFF6F398E)),
           const SizedBox(width: 10),
           Expanded(
-              child: Text('$label: $value',
-                  style: TextStyle(fontSize: 15, color: Colors.grey.shade800))),
+            child: Text(
+              '$label: $value',
+              style: TextStyle(fontSize: 15, color: Colors.grey.shade800),
+            ),
+          ),
         ],
       ),
     );

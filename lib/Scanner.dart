@@ -6,6 +6,10 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 
+// ✅ ปรับ path ให้ตรงตำแหน่งไฟล์จริงของคุณ
+import 'package:myfridge_test/log_service.dart';
+import 'package:myfridge_test/quantity_converter.dart';
+
 class BarcodeScannerPage extends StatefulWidget {
   const BarcodeScannerPage({super.key});
 
@@ -22,7 +26,30 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage> {
   bool _isProcessing = false;
   bool _hasScanned = false;
 
-  /// ✅ เมื่อสแกนเจอ → ค้นสินค้า → เพิ่มลง Fridge พร้อมวันหมดอายุ
+  /// map หมวดจาก products → key ที่ summary รองรับ
+  String _mapCategory(dynamic raw) {
+    final c = (raw ?? '').toString().toLowerCase().trim();
+    switch (c) {
+      case 'pork':
+      case 'beef':
+      case 'chicken':
+        return c;
+      case 'vegetable':
+      case 'veggie':
+        return 'vegetable';
+      case 'fruit':
+      case 'fruits':
+        return 'fruit';
+      case 'seafood':
+        return 'seafood';
+      case 'meat':
+        return 'meat';
+      default:
+        return 'other';
+    }
+  }
+
+  /// ✅ เมื่อสแกนเจอ → ค้นสินค้า → เพิ่มลง Fridge+FridgeLog ผ่าน LogService
   Future<void> _handleBarcode(String barcode) async {
     if (_isProcessing || _hasScanned) return;
     setState(() {
@@ -40,7 +67,7 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage> {
     }
 
     try {
-      // ✅ ค้นหาสินค้าจากตาราง products
+      // 1) ค้นสินค้าจากตาราง products
       final productSnap = await _firestore
           .collection('products')
           .where('barcode', isEqualTo: barcode)
@@ -56,51 +83,58 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage> {
         return;
       }
 
-      final productData = productSnap.docs.first.data();
-      final productName = productData['name'] ?? "Unknown Product";
-      final category = productData['category'] ?? "Other";
+      final doc = productSnap.docs.first;
+      final data = doc.data();
 
-      // ✅ expdate คือจำนวนวันที่หมดอายุ (int)
-      final expdate = productData['expdate'];
+      final String productId   = doc.id; // ใช้ id เอกสารเป็น productId
+      final String productName = (data['name'] ?? "Unknown Product").toString();
+      final String categoryKey = _mapCategory(data['category']);
+      final String unit        = (data['unit'] ?? 'kg').toString().toLowerCase();
+
+      // อายุสินค้าเป็น "จำนวนวัน" (รองรับ expdate หรือ shelfLife)
+      final int? expDays = (data['expdate'] is int)
+          ? data['expdate'] as int
+          : (data['shelfLife'] is int ? data['shelfLife'] as int : null);
+
       final now = DateTime.now();
+      final DateTime expiryDate = expDays != null ? now.add(Duration(days: expDays)) : now.add(const Duration(days: 7));
 
-      // ✅ คำนวณวันหมดอายุจริง
-      DateTime expirationDate = now;
-      if (expdate is int) {
-        expirationDate = now.add(Duration(days: expdate));
+      // 2) ถ่ายรูป (optional)
+      String imageUrl = (data['imageUrl'] ?? '').toString();
+      try {
+        final photo = await _picker.pickImage(source: ImageSource.camera);
+        if (photo != null) {
+          final file = File(photo.path);
+          final ref = _storage
+              .ref()
+              .child('Fridge/${user.uid}/${DateTime.now().millisecondsSinceEpoch}.jpg');
+          await ref.putFile(file);
+          imageUrl = await ref.getDownloadURL();
+        }
+      } catch (_) {
+        // ข้ามได้ ถ้าไม่อยากบังคับรูป
       }
 
-      // ✅ ถ่ายรูปสินค้า
-      final photo = await _picker.pickImage(source: ImageSource.camera);
-      if (photo == null) {
-        if (mounted) Navigator.pop(context);
-        return;
-      }
-      final imageFile = File(photo.path);
+      // 3) คำนวณปริมาณเป็น kg (ถ้าหน่วยไม่รู้จัก จะถือว่า 1.0 kg)
+      const double baseQty = 1.0; // สแกน 1 แพ็ค = 1 unit
+      final double qtyKg = QuantityConverter.toKg(baseQty, unit);
 
-      // ✅ อัปโหลดรูปไป Firebase Storage
-      final ref = _storage
-          .ref()
-          .child('Fridge/${user.uid}/${DateTime.now().millisecondsSinceEpoch}.jpg');
-      await ref.putFile(imageFile);
-      final imageUrl = await ref.getDownloadURL();
-
-      // ✅ เพิ่มข้อมูลลง Fridge
-      await _firestore.collection('Fridge').add({
-        'userId': user.uid,
-        'barcode': barcode,
-        'productName': productName,
-        'category': category,
-        'imageUrl': imageUrl,
-        'createdAt': now,
-        'expirationDate': expirationDate,
-      });
+      // 4) ✅ บันทึก Fridge + FridgeLog ผ่าน Service เดียว
+      await LogService.addFridgeItemAndLog(
+        userId: user.uid,
+        productId: productId,
+        productName: productName,
+        category: categoryKey,
+        quantityKg: qtyKg,
+        imageUrl: imageUrl,
+        expiryDate: expiryDate,
+      );
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            "✅ เพิ่ม $productName สำเร็จ\nหมดอายุ: ${expirationDate.toLocal().toString().split(' ')[0]}",
+            "✅ เพิ่ม $productName สำเร็จ\nหมดอายุ: ${expiryDate.toLocal().toString().split(' ').first}",
           ),
         ),
       );
@@ -111,9 +145,7 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage> {
             .showSnackBar(SnackBar(content: Text("❌ เกิดข้อผิดพลาด: $e")));
       }
     } finally {
-      if (mounted) {
-        setState(() => _isProcessing = false);
-      }
+      if (mounted) setState(() => _isProcessing = false);
     }
   }
 
@@ -124,9 +156,11 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage> {
         children: [
           MobileScanner(
             onDetect: (capture) {
-              final barcode = capture.barcodes.first.rawValue ?? "";
-              if (!_isProcessing && barcode.isNotEmpty) {
-                _handleBarcode(barcode);
+              final code = capture.barcodes.isNotEmpty
+                  ? capture.barcodes.first.rawValue
+                  : null;
+              if (!_isProcessing && !_hasScanned && code != null && code.isNotEmpty) {
+                _handleBarcode(code);
               }
             },
           ),
@@ -200,7 +234,7 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage> {
             ),
           ),
 
-          // ✅ Loading ระหว่างอัปโหลด
+          // ✅ Loading ระหว่างบันทึก
           if (_isProcessing)
             Container(
               color: Colors.black54,
@@ -210,10 +244,7 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage> {
                   children: [
                     CircularProgressIndicator(color: Colors.white),
                     SizedBox(height: 10),
-                    Text(
-                      "กำลังบันทึกข้อมูล...",
-                      style: TextStyle(color: Colors.white),
-                    ),
+                    Text("กำลังบันทึกข้อมูล...", style: TextStyle(color: Colors.white)),
                   ],
                 ),
               ),

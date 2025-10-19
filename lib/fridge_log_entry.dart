@@ -1,6 +1,7 @@
 // lib/fridge_log_entry.dart
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+/// ประเภทของหมวดหมู่อาหาร
 enum FoodCategory {
   pork,
   beef,
@@ -9,11 +10,13 @@ enum FoodCategory {
   fruit,
   seafood,
   meat,
-  other
+  other,
 }
 
+/// ประเภทของเหตุการณ์ (log)
 enum LogEventType { added, removed, adjusted }
 
+/// โมเดลข้อมูลการบันทึกประวัติอาหารในตู้เย็น
 class FridgeLogEntry {
   final String id;
   final String userId;
@@ -35,6 +38,7 @@ class FridgeLogEntry {
     required this.quantityKg,
   });
 
+  /// อ่านจาก Firestore Document → Object
   static FridgeLogEntry fromFirestore(
     DocumentSnapshot<Map<String, dynamic>> doc,
     SnapshotOptions? _,
@@ -76,6 +80,7 @@ class FridgeLogEntry {
     );
   }
 
+  /// แปลง Object → Firestore Document
   static Map<String, Object?> toFirestore(FridgeLogEntry e, SetOptions? _) {
     return {
       'userId': e.userId,

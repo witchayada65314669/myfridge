@@ -1,10 +1,12 @@
+// lib/summary_page.dart
 import 'dart:math' as math;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
 
-import 'fridge_log_entry.dart'; // โมเดล typed ของ FridgeLog
+import 'package:myfridge_test/fridge_log_entry.dart';            // โมเดล typed ของ FridgeLog
+import 'package:myfridge_test/log_service.dart';            // สำหรับ self-heal เติม Log อัตโนมัติ
 
 // ===== Utils =====
 class CardGradient {
@@ -41,6 +43,9 @@ class _SummaryPageState extends State<SummaryPage> {
   final List<String> meatTypes = const ['all', 'pork', 'beef', 'chicken'];
   String selectedMeat = 'all';
 
+  // self-heal flag
+  bool _didSelfHeal = false;
+
   // Firestore collection (typed)
   late final CollectionReference<FridgeLogEntry> _logCol = FirebaseFirestore
       .instance
@@ -50,7 +55,23 @@ class _SummaryPageState extends State<SummaryPage> {
         toFirestore: FridgeLogEntry.toFirestore,
       );
 
-  // ====== Stream (Safe mode ตลอด: query แค่ userId แล้วกรองบนเครื่อง) ======
+  @override
+  void initState() {
+    super.initState();
+    // ✅ ซ่อมอัตโนมัติ: ถ้าใน Fridge มีเอกสารที่ยังไม่มี Log → เติม Log ให้
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (_didSelfHeal) return;
+      try {
+        await LogService.ensureFridgeLogForUserRecent(widget.userId, limit: 80);
+      } catch (_) {
+        // เงียบไว้ — ไม่ให้รบกวน UI
+      } finally {
+        if (mounted) setState(() => _didSelfHeal = true);
+      }
+    });
+  }
+
+  // ====== Stream (อ่านจาก FridgeLog อย่างเดียว) ======
   Stream<List<FridgeLogEntry>> _itemsStream() {
     return _logCol
         .where('userId', isEqualTo: widget.userId)
@@ -81,8 +102,8 @@ class _SummaryPageState extends State<SummaryPage> {
       final name = e.productName.trim().replaceAll(RegExp(r'\s+'), ' ');
       map[name] = (map[name] ?? 0) + e.quantityKg;
     }
-    final list = map.entries.map((e) => BarItem(e.key, e.value)).toList();
-    list.sort((a, b) => b.kg.compareTo(a.kg));
+    final list = map.entries.map((e) => BarItem(e.key, e.value)).toList()
+      ..sort((a, b) => b.kg.compareTo(a.kg));
     return list;
   }
 
@@ -532,13 +553,13 @@ class _CategoryCard extends StatelessWidget {
                     ),
                   );
 
-                  // labels บนแท่ง
+                  // labels บนแท่ง — จัดกึ่งกลางแนวนอนของแท่ง + ยกสูงขึ้นเล็กน้อย
                   const double _labelLift = 0.22;
                   final int n = bars.length;
                   final labels = List.generate(n, (i) {
                     final y = bars[i].kg;
                     final yFrac = (y / maxY).clamp(0.0, 1.0);
-                    final xFrac = (i + 1) / (n + 1);
+                    final xFrac = (i + 1) / (n + 1); // กระจายเท่ากันซ้าย→ขวา
                     final yAlign =
                         (1 - 2 * yFrac - _labelLift).clamp(-0.98, 0.98);
                     return Align(

@@ -1,27 +1,24 @@
-// lib/model/log_service.dart
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 class LogService {
-  /// เพิ่มของเข้าคอลเลกชัน Fridge และเขียน FridgeLog (eventType=added)
   static Future<void> addFridgeItemAndLog({
     required String userId,
     required String productId,
     required String productName,
     required String
-        category, // 'pork' | 'beef' | 'chicken' | 'vegetable' | 'fruit' | 'seafood' | 'meat'
-    required double quantityKg, // หน่วยเป็น kg เท่านั้น
+        category, // pork/beef/chicken/vegetable/fruit/seafood/meat/other
+    required double quantityKg, // kg เสมอ
     String imageUrl = '',
     DateTime? expiryDate,
   }) async {
     final fs = FirebaseFirestore.instance;
 
-    // 1) เข้าตู้ (Fridge)
     final docRef = await fs.collection('Fridge').add({
       'userId': userId,
       'productId': productId,
       'productName': productName.trim(),
       'category': category.toLowerCase(),
-      'quantity': quantityKg, // เก็บเป็น kg
+      'quantity': quantityKg,
       'unit': 'kg',
       'imageUrl': imageUrl,
       'expiryDate': expiryDate != null ? Timestamp.fromDate(expiryDate) : null,
@@ -29,7 +26,6 @@ class LogService {
       'updatedAt': FieldValue.serverTimestamp(),
     });
 
-    // 2) Log (FridgeLog) — summary จะอ่านจากตรงนี้
     await fs.collection('FridgeLog').add({
       'userId': userId,
       'eventType': 'added',
@@ -43,7 +39,6 @@ class LogService {
     });
   }
 
-  /// ใช้กรณี "เพิ่มเข้า Fridge ไปแล้วที่หน้าอื่น" — จะเขียนเฉพาะ Log เพิ่มเติม
   static Future<void> logAddedOnly({
     required String userId,
     required String productId,
@@ -64,5 +59,50 @@ class LogService {
       'source': 'app_add_onlylog',
       if (fridgeDocId != null) 'fridgeDocId': fridgeDocId,
     });
+  }
+
+  // ซ่อมอัตโนมัติ: ถ้าใน Fridge มีเอกสารที่ยังไม่มี Log → สร้าง Log ให้
+  static Future<int> ensureFridgeLogForUserRecent(String userId,
+      {int limit = 80}) async {
+    final fs = FirebaseFirestore.instance;
+    final snap = await fs
+        .collection('Fridge')
+        .where('userId', isEqualTo: userId)
+        .orderBy('addedAt', descending: true)
+        .limit(limit)
+        .get();
+
+    int created = 0;
+    for (final d in snap.docs) {
+      final data = d.data();
+      final unit = (data['unit'] ?? '').toString().toLowerCase();
+      if (unit != 'kg') continue;
+
+      final existed = await fs
+          .collection('FridgeLog')
+          .where('userId', isEqualTo: userId)
+          .where('fridgeDocId', isEqualTo: d.id)
+          .limit(1)
+          .get();
+      if (existed.docs.isNotEmpty) continue;
+
+      final q = data['quantity'];
+      final qty = (q is num) ? q.toDouble() : double.tryParse('$q') ?? 0.0;
+      if (qty <= 0) continue;
+
+      await fs.collection('FridgeLog').add({
+        'userId': userId,
+        'eventType': 'added',
+        'eventAt': data['addedAt'] ?? FieldValue.serverTimestamp(),
+        'productId': (data['productId'] ?? '').toString(),
+        'productName': (data['productName'] ?? '').toString().trim(),
+        'category': (data['category'] ?? 'other').toString().toLowerCase(),
+        'quantityKg': qty,
+        'source': 'self_heal_from_fridge',
+        'fridgeDocId': d.id,
+      });
+      created++;
+    }
+    return created;
   }
 }
