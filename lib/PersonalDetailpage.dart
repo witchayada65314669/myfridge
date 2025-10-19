@@ -46,7 +46,7 @@ class _PersonalDetailsBottomSheetState
       final ref = FirebaseStorage.instance
           .ref()
           .child('profile_images')
-          .child('${_user!.uid}.jpg');
+          .child('${_user.uid}.jpg');
 
       await ref.putFile(_imageFile!);
       final downloadUrl = await ref.getDownloadURL();

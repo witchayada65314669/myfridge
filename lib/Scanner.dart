@@ -59,11 +59,16 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage> {
       final productData = productSnap.docs.first.data();
       final productName = productData['name'] ?? "Unknown Product";
       final category = productData['category'] ?? "Other";
-      final expireDays = productData['expireDays'] ?? 7; // ค่า default 7 วัน
 
-      // ✅ คำนวณวันหมดอายุ
-      final DateTime now = DateTime.now();
-      final DateTime expirationDate = now.add(Duration(days: expireDays));
+      // ✅ expdate คือจำนวนวันที่หมดอายุ (int)
+      final expdate = productData['expdate'];
+      final now = DateTime.now();
+
+      // ✅ คำนวณวันหมดอายุจริง
+      DateTime expirationDate = now;
+      if (expdate is int) {
+        expirationDate = now.add(Duration(days: expdate));
+      }
 
       // ✅ ถ่ายรูปสินค้า
       final photo = await _picker.pickImage(source: ImageSource.camera);
@@ -87,14 +92,16 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage> {
         'productName': productName,
         'category': category,
         'imageUrl': imageUrl,
-        'createdAt': FieldValue.serverTimestamp(),
-        'expirationDate': expirationDate, // เพิ่มวันหมดอายุ
+        'createdAt': now,
+        'expirationDate': expirationDate,
       });
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text("✅ เพิ่ม $productName สำเร็จ (หมดอายุ: ${expirationDate.toLocal().toString().split(' ')[0]})"),
+          content: Text(
+            "✅ เพิ่ม $productName สำเร็จ\nหมดอายุ: ${expirationDate.toLocal().toString().split(' ')[0]}",
+          ),
         ),
       );
       Navigator.pop(context);

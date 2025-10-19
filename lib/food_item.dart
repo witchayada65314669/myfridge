@@ -35,8 +35,8 @@ class FoodItem {
         category: category,
         userId: userId,
         imageUrl: data['imageUrl']?.toString(),
-        expirationDate: _parseDate(data['expiryDate']),
-        addedDate: _parseDate(data['addedAt']),
+        expirationDate: _parseDate(data['expirationDate']),
+        addedDate: _parseDate(data['createdAt']),
         weight: data['quantity'] != null
             ? double.tryParse(data['quantity'].toString())
             : null,

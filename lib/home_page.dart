@@ -10,6 +10,7 @@ import 'package:myfridge_test/setting_page.dart';
 import 'package:myfridge_test/login_page.dart';
 import 'package:myfridge_test/add_item_page.dart';
 import 'package:myfridge_test/notification_service.dart';
+import 'package:myfridge_test/notification_history_page.dart';
 
 class HomePage extends StatefulWidget {
   final String? usersName;
@@ -24,28 +25,37 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final User? _currentUser = FirebaseAuth.instance.currentUser;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  bool _isShowingNotification = false;
 
   String selectedCategory = 'All';
   final List<String> categories = ['All', 'Meat', 'Vegetable', 'Fruit', 'Seafood'];
-  List<AppNotification> _notifications = [];
 
-  /// ✅ Stream ใช้ collection เดิมชื่อ "Fridge"
-  Stream<QuerySnapshot> _getUserFoodStream() {
-    if (_currentUser == null) return const Stream.empty();
-    return _firestore
-        .collection('Fridge')
-        .where('userId', isEqualTo: _currentUser!.uid)
-        .snapshots();
-  }
+  String? _profileImageUrl; // ✅ เก็บลิงก์โปรไฟล์
 
   @override
   void initState() {
     super.initState();
+    _loadProfileImage(); // ✅ โหลดรูปโปรไฟล์
     _scheduleDailyReminder();
+    _checkExpiringSoon();
   }
 
-  /// ✅ แจ้งเตือนประจำวันของของใกล้หมดอายุ
+  /// ✅ โหลดรูปโปรไฟล์จาก Firestore
+  Future<void> _loadProfileImage() async {
+    if (_currentUser == null) return;
+    try {
+      final doc =
+          await _firestore.collection('Users').doc(_currentUser!.uid).get();
+      if (doc.exists && doc.data()!.containsKey('photoUrl')) {
+        setState(() => _profileImageUrl = doc['photoUrl']);
+      } else if (_currentUser!.photoURL != null) {
+        setState(() => _profileImageUrl = _currentUser!.photoURL);
+      }
+    } catch (e) {
+      debugPrint('โหลดรูปโปรไฟล์ผิดพลาด: $e');
+    }
+  }
+
+  /// ✅ แจ้งเตือนประจำวัน
   Future<void> _scheduleDailyReminder() async {
     final now = DateTime.now();
     final snapshot = await _firestore
@@ -54,30 +64,86 @@ class _HomePageState extends State<HomePage> {
         .get();
 
     final items = snapshot.docs.map((doc) => FoodItem.fromFirestore(doc)).toList();
-    final expiring = items.where((i) =>
-        i.expirationDate != null &&
-        i.expirationDate!.difference(now).inDays <= 2).toList();
+    final expiringSoon = items
+        .where((i) =>
+            i.expirationDate != null &&
+            i.expirationDate!.isAfter(now) &&
+            i.expirationDate!.difference(now).inDays <= 3)
+        .toList();
 
     String body;
-    if (expiring.isEmpty) {
-      body = "วันนี้ไม่มีของที่ใกล้หมดอายุ 🎉";
+    if (expiringSoon.isEmpty) {
+      body = "ไม่มีของที่ใกล้หมดอายุ 🎉";
     } else {
-      body = "วันนี้มีของใกล้หมดอายุ ${expiring.length} รายการ เช่น ${expiring.first.name}";
+      final names = expiringSoon.map((e) => e.name).take(3).join(", ");
+      body =
+          "มีของใกล้หมดอายุ ${expiringSoon.length} รายการ เช่น $names (${expiringSoon.first.expirationDate != null ? DateFormat('dd/MM').format(expiringSoon.first.expirationDate!) : ''})";
     }
 
     await NotificationService.scheduleDailyNotification(
-      "🧊 สรุปของในตู้เย็นวันนี้",
+      "🧊 ของใกล้หมดอายุ",
       body,
     );
   }
 
-  String _normalizeCategory(String category) {
-    final c = category.toLowerCase();
-    if (['pork', 'beef', 'chicken', 'meat'].contains(c)) return 'Meat';
-    if (['vegetable', 'carrot', 'broccoli'].contains(c)) return 'Vegetable';
-    if (['fruit', 'apple', 'banana'].contains(c)) return 'Fruit';
-    if (['seafood', 'fish', 'shrimp'].contains(c)) return 'Seafood';
-    return 'Other';
+  /// ✅ Popup แจ้งเตือนทันทีถ้ามีของหมดอายุใน 1 วัน
+  Future<void> _checkExpiringSoon() async {
+    final now = DateTime.now();
+    final snapshot = await _firestore
+        .collection('Fridge')
+        .where('userId', isEqualTo: _currentUser?.uid)
+        .get();
+
+    final items = snapshot.docs.map((doc) => FoodItem.fromFirestore(doc)).toList();
+    final expiringSoon = items
+        .where((i) =>
+            i.expirationDate != null &&
+            i.expirationDate!.isAfter(now) &&
+            i.expirationDate!.difference(now).inDays <= 1)
+        .toList();
+
+    if (expiringSoon.isNotEmpty && mounted) {
+      final names = expiringSoon.map((e) => e.name).take(3).join(", ");
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        showDialog(
+          context: context,
+          builder: (_) => AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+            title: const Text("⏰ ของใกล้หมดอายุ",
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            content: Text(
+              "พบ ${expiringSoon.length} รายการ เช่น $names\nกรุณาเช็คตู้เย็นของคุณก่อนหมดอายุ!",
+              style: const TextStyle(fontSize: 15),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text("ปิด", style: TextStyle(color: Colors.grey)),
+              ),
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => NotificationHistoryPage()),
+                  );
+                },
+                child: const Text("ดูทั้งหมด",
+                    style: TextStyle(color: Color(0xFF6F398E))),
+              ),
+            ],
+          ),
+        );
+      });
+    }
+  }
+
+  Stream<QuerySnapshot> _getUserFoodStream() {
+    if (_currentUser == null) return const Stream.empty();
+    return _firestore
+        .collection('Fridge')
+        .where('userId', isEqualTo: _currentUser!.uid)
+        .snapshots();
   }
 
   Color _getCategoryColor(String category) {
@@ -95,103 +161,13 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  List<AppNotification> _generateNotifications(List<FoodItem> items) {
-    final now = DateTime.now();
-    return items
-        .where((i) =>
-            i.expirationDate != null &&
-            i.expirationDate!.difference(now).inDays <= 2)
-        .map((i) => AppNotification(
-              "ใกล้หมดอายุ!",
-              "${i.name} จะหมดอายุใน ${i.expirationDate!.difference(now).inDays} วัน",
-            ))
-        .toList();
-  }
-
-  void _showNotifications() {
-    if (_isShowingNotification) return;
-    _isShowingNotification = true;
-
-    final overlay = Overlay.of(context);
-    late OverlayEntry entry;
-
-    String title;
-    String message;
-
-    if (_notifications.isEmpty) {
-      title = "🎉 ไม่มีของใกล้หมดอายุ";
-      message = "ตู้เย็นของคุณยังสดใหม่อยู่เลย 😋";
-    } else {
-      title = "⏳ ของใกล้หมดอายุ ${_notifications.length} รายการ";
-      message = _notifications.map((n) => n.message).join("\n");
-    }
-
-    entry = OverlayEntry(
-      builder: (context) => Positioned(
-        top: 0,
-        left: 0,
-        right: 0,
-        child: SafeArea(
-          child: TweenAnimationBuilder<double>(
-            tween: Tween(begin: -150, end: 0),
-            duration: const Duration(milliseconds: 400),
-            curve: Curves.easeOutCubic,
-            builder: (context, value, child) {
-              return Transform.translate(
-                offset: Offset(0, value),
-                child: child,
-              );
-            },
-            child: Material(
-              color: Colors.transparent,
-              child: Container(
-                margin: const EdgeInsets.all(10),
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.2),
-                      blurRadius: 10,
-                      offset: const Offset(0, 3),
-                    ),
-                  ],
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.notifications_active_rounded,
-                        color: Color(0xFF6F398E), size: 28),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(title,
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Color(0xFF6F398E))),
-                          const SizedBox(height: 2),
-                          Text(message,
-                              style: const TextStyle(
-                                  color: Colors.black87, fontSize: 14)),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-
-    overlay.insert(entry);
-    Future.delayed(const Duration(seconds: 3), () {
-      entry.remove();
-      _isShowingNotification = false;
-    });
+  String _normalizeCategory(String category) {
+    final c = category.toLowerCase();
+    if (['pork', 'beef', 'chicken', 'meat'].contains(c)) return 'Meat';
+    if (['vegetable', 'carrot', 'broccoli'].contains(c)) return 'Vegetable';
+    if (['fruit', 'apple', 'banana'].contains(c)) return 'Fruit';
+    if (['seafood', 'fish', 'shrimp'].contains(c)) return 'Seafood';
+    return 'Other';
   }
 
   @override
@@ -218,19 +194,11 @@ class _HomePageState extends State<HomePage> {
                 }
                 if (snapshot.connectionState == ConnectionState.waiting) {
                   return const Center(
-                    child: CircularProgressIndicator(color: Color(0xFF6F398E)),
-                  );
+                      child: CircularProgressIndicator(color: Color(0xFF6F398E)));
                 }
 
                 final items =
                     snapshot.data!.docs.map((d) => FoodItem.fromFirestore(d)).toList();
-
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  final newNotifications = _generateNotifications(items);
-                  if (mounted && newNotifications.length != _notifications.length) {
-                    setState(() => _notifications = newNotifications);
-                  }
-                });
 
                 final filtered = selectedCategory == 'All'
                     ? items
@@ -241,7 +209,7 @@ class _HomePageState extends State<HomePage> {
 
                 if (filtered.isEmpty) {
                   return const Center(
-                      child: Text("🥶 ไม่มีรายการในหมวดนี้",
+                      child: Text("ยังไม่มีอาหารในตู้เย็น",
                           style: TextStyle(fontSize: 16)));
                 }
 
@@ -277,6 +245,7 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  /// ✅ AppBar + ปุ่มแจ้งเตือน
   PreferredSizeWidget _buildAppBar() {
     return AppBar(
       backgroundColor: Colors.white,
@@ -294,9 +263,83 @@ class _HomePageState extends State<HomePage> {
         IconButton(
           icon: const Icon(Icons.notifications_rounded,
               color: Color(0xFF6F398E), size: 30),
-          onPressed: _showNotifications,
+          onPressed: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => NotificationHistoryPage()),
+            );
+          },
         ),
       ],
+    );
+  }
+
+  /// ✅ Drawer แสดงชื่อ อีเมล และรูปโปรไฟล์
+  Widget _buildDrawer() {
+    return Drawer(
+      child: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [Color(0xFF6F398E), Color(0xFFCACBE7)],
+            begin: Alignment.topRight,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: Column(
+          children: [
+            UserAccountsDrawerHeader(
+              decoration: const BoxDecoration(color: Colors.transparent),
+              accountName: Text(_currentUser?.displayName ?? "User"),
+              accountEmail: Text(_currentUser?.email ?? "No Email"),
+              currentAccountPicture: CircleAvatar(
+                backgroundColor: Colors.white,
+                backgroundImage: _profileImageUrl != null
+                    ? NetworkImage(_profileImageUrl!)
+                    : null,
+                child: _profileImageUrl == null
+                    ? const Icon(Icons.person, color: Colors.black, size: 40)
+                    : null,
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.article, color: Colors.white),
+              title: const Text('Summary', style: TextStyle(color: Colors.white)),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => SummaryPage(userId: _currentUser!.uid)),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.settings, color: Colors.white),
+              title: const Text('Settings', style: TextStyle(color: Colors.white)),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(context,
+                    MaterialPageRoute(builder: (_) => const SettingPage()));
+              },
+            ),
+            const Spacer(),
+            ListTile(
+              leading: const Icon(Icons.exit_to_app, color: Colors.redAccent),
+              title:
+                  const Text('Logout', style: TextStyle(color: Colors.redAccent)),
+              onTap: () async {
+                await FirebaseAuth.instance.signOut();
+                if (!mounted) return;
+                Navigator.pushAndRemoveUntil(
+                  context,
+                  MaterialPageRoute(builder: (_) => const LoginPage()),
+                  (route) => false,
+                );
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -353,10 +396,17 @@ class _HomePageState extends State<HomePage> {
                   Text(item.name,
                       style: const TextStyle(
                           color: Colors.white, fontWeight: FontWeight.bold)),
+                  if (item.addedDate != null)
+                    Text(
+                      'Added: ${DateFormat('dd/MM/yyyy').format(item.addedDate!)}',
+                      style:
+                          const TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
                   if (item.expirationDate != null)
                     Text(
                       'Exp: ${DateFormat('dd/MM/yyyy').format(item.expirationDate!)}',
-                      style: const TextStyle(color: Colors.white70, fontSize: 12),
+                      style:
+                          const TextStyle(color: Colors.white70, fontSize: 12),
                     ),
                 ],
               ),
@@ -406,6 +456,8 @@ class _HomePageState extends State<HomePage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('หมวดหมู่: ${_normalizeCategory(item.category)}'),
+            if (item.addedDate != null)
+              Text('วันที่เพิ่ม: ${DateFormat('dd/MM/yyyy').format(item.addedDate!)}'),
             if (item.expirationDate != null)
               Text('วันหมดอายุ: ${DateFormat('dd/MM/yyyy').format(item.expirationDate!)}'),
           ],
@@ -427,71 +479,4 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
-
-  Widget _buildDrawer() {
-    return Drawer(
-      child: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Color(0xFF6F398E), Color(0xFFCACBE7)],
-            begin: Alignment.topRight,
-            end: Alignment.bottomRight,
-          ),
-        ),
-        child: Column(
-          children: [
-            UserAccountsDrawerHeader(
-              decoration: const BoxDecoration(color: Colors.transparent),
-              accountName: Text(_currentUser?.displayName ?? "User"),
-              accountEmail: Text(_currentUser?.email ?? "No Email"),
-              currentAccountPicture: const CircleAvatar(
-                backgroundColor: Colors.white,
-                child: Icon(Icons.person, color: Colors.black),
-              ),
-            ),
-            ListTile(
-              leading: const Icon(Icons.article, color: Colors.white),
-              title: const Text('Summary', style: TextStyle(color: Colors.white)),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => SummaryPage(userId: _currentUser!.uid)),
-                );
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.settings, color: Colors.white),
-              title: const Text('Settings', style: TextStyle(color: Colors.white)),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(
-                    context, MaterialPageRoute(builder: (_) => const SettingPage()));
-              },
-            ),
-            const Spacer(),
-            ListTile(
-              leading: const Icon(Icons.exit_to_app, color: Colors.redAccent),
-              title: const Text('Logout', style: TextStyle(color: Colors.redAccent)),
-              onTap: () async {
-                await FirebaseAuth.instance.signOut();
-                if (!mounted) return;
-                Navigator.pushAndRemoveUntil(
-                  context,
-                  MaterialPageRoute(builder: (_) => const LoginPage()),
-                  (route) => false,
-                );
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class AppNotification {
-  final String title;
-  final String message;
-  AppNotification(this.title, this.message);
 }
